@@ -1,7 +1,7 @@
 {
   "name": "vexor-md",
   "version": "1.0.0",
-  "description": "VEXOR MD - Shinmon Benimaru Edition",
+  "description": "VEXOR MD",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -10,11 +10,8 @@
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.8",
     "axios": "^1.7.2",
-    "chalk": "^5.3.0",
-    "dotenv": "^16.4.5",
-    "pino": "^9.2.0"
-  },
-  "overrides": {
-    "libsignal": "https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/master"
+    "pino": "^9.2.0",
+    "wa-sticker-formatter": "^4.4.4",
+    "dotenv": "^16.4.5"
   }
 }
