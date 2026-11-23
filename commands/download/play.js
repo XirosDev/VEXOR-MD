@@ -1,4 +1,5 @@
 import axios from 'axios';
+import yts from 'yt-search';
 import config from '../../config.js';
 
 export default {
@@ -6,48 +7,58 @@ export default {
   aliases: ['song', 'music', 'ytmp3'],
   category: 'download',
 
-  async execute(sock, m, { text, toBoldSmallCaps, formatBox }) {
+  async execute(sock, m, { text, toBoldSmallCaps, formatBox, t, logger }) {
     if (!text) {
-      return m.reply(
-        formatBox('ᴠᴇxᴏʀ ᴘʟᴀʏ', [
-          `${toBoldSmallCaps('provide a song title or link')}`
-        ])
-      );
+      return m.reply(formatBox('vexor play', [toBoldSmallCaps(t('play_no_query'))]));
     }
 
     await sock.sendMessage(m.chat, { react: { text: '🎵', key: m.key } });
 
-    // Appel via API publique de recherche/téléchargement audio
-    const res = await axios.get(
-      `https://api.siputzx.my.id/api/d/ytmp3?url=${encodeURIComponent(text)}`
-    ).catch(() => null);
+    // 1. Recherche YouTube par titre ou lien
+    const search = await yts(text);
+    const video = search.videos?.[0];
 
-    const data = res?.data?.data;
-    if (!data || !data.dl) {
-      return m.reply(
-        formatBox('ᴠᴇxᴏʀ ᴘʟᴀʏ', [
-          `${toBoldSmallCaps('audio not found or api unavailable')}`
-        ])
-      );
+    if (!video) {
+      logger.debug('PLAY', 'Aucun résultat yts pour :', text);
+      return m.reply(formatBox('vexor play', [toBoldSmallCaps(t('play_not_found'))]));
     }
 
-    const infoBox = formatBox('ɴᴏᴡ ᴘʟᴀʏɪɴɢ', [
-      `${toBoldSmallCaps('title')} : ${toBoldSmallCaps(data.title || text)}`,
-      `${toBoldSmallCaps('format')} : *ᴍᴘ3 ᴀᴜᴅɪᴏ*`
-    ]);
+    logger.info('PLAY', `Trouvé : ${video.title} (${video.url})`);
+
+    // 2. Tentative sur deux APIs de téléchargement MP3 (secours automatique)
+    const endpoints = [
+      `https://api.siputzx.my.id/api/d/ytmp3?url=${encodeURIComponent(video.url)}`,
+      `https://api.ryzendesu.vip/api/downloader/ytmp3?url=${encodeURIComponent(video.url)}`
+    ];
+
+    let audioUrl = null;
+    for (const endpoint of endpoints) {
+      try {
+        const res = await axios.get(endpoint, { timeout: 20000 });
+        logger.debug('PLAY', `Réponse API (${endpoint.split('/')[2]})`, res.status);
+        audioUrl = res.data?.data?.dl || res.data?.url || res.data?.downloadUrl;
+        if (audioUrl) break;
+      } catch (err) {
+        logger.error('PLAY', `API en échec : ${endpoint.split('/')[2]}`, err);
+      }
+    }
+
+    if (!audioUrl) {
+      return m.reply(formatBox('vexor play', [toBoldSmallCaps(t('play_api_error'))]));
+    }
 
     await sock.sendMessage(
       m.chat,
       {
-        audio: { url: data.dl },
+        audio: { url: audioUrl },
         mimetype: 'audio/mpeg',
-        fileName: `${data.title || 'audio'}.mp3`,
+        fileName: `${video.title}.mp3`,
         contextInfo: {
           externalAdReply: {
-            title: data.title || config.headerTitle,
-            body: config.edition,
-            thumbnailUrl: data.thumbnail || config.benimaruPic,
-            sourceUrl: config.channelUrl,
+            title: video.title,
+            body: `${video.timestamp} • ${config.edition}`,
+            thumbnailUrl: video.thumbnail || config.benimaruPic,
+            sourceUrl: video.url,
             mediaType: 1,
             renderLargerThumbnail: false
           }
