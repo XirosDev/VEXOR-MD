@@ -55,3 +55,13 @@ export function getGroupStats(groupJid) {
   return Object.entries(groupStats)
     .sort(([, a], [, b]) => b - a); // Tri du plus actif au moins actif
                                            }
+export function getBotLang() {
+  const db = getDb();
+  return db.lang || 'fr'; // Français par défaut
+}
+
+export function setBotLang(lang) {
+  const db = getDb();
+  db.lang = lang;
+  saveDb(db);
+  }
