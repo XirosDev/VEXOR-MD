@@ -3,14 +3,32 @@ import path from 'path';
 import config from '../config.js';
 import { toSmallCaps, toBoldSmallCaps, formatBox } from './font.js';
 import { getGroupConfig, incrementMessageCount } from './db.js';
+import { t } from './lang.js';
+import { logger } from './logger.js';
 
 export const commands = new Map();
 
-// 1. Chargement dynamique de tous les fichiers dans commands/
+// Extrait uniquement l'identifiant brut (gère @s.whatsapp.net et @lid)
+function normalizeId(jid = '') {
+  return String(jid).split(':')[0].split('@')[0];
+}
+
+function matchParticipant(participant, targetIds) {
+  const pIds = [
+    participant.id,
+    participant.jid,
+    participant.phoneNumber,
+    participant.lid
+  ]
+    .filter(Boolean)
+    .map(normalizeId);
+  return pIds.some(id => targetIds.includes(id));
+}
+
 export async function loadCommands() {
   commands.clear();
   const commandsDir = path.resolve('./commands');
-  if (!fs.existsSync(commandsDir)) fs.mkdirSync(commandsDir);
+  if (!fs.existsSync(commandsDir)) fs.mkdirSync(commandsDir, { recursive: true });
 
   const categories = fs.readdirSync(commandsDir);
   for (const category of categories) {
@@ -19,102 +37,117 @@ export async function loadCommands() {
 
     const files = fs.readdirSync(categoryPath).filter(f => f.endsWith('.js'));
     for (const file of files) {
-      const filePath = `../commands/${category}/${file}`;
-      const { default: cmd } = await import(`${filePath}?update=${Date.now()}`);
-      if (cmd && cmd.name) {
-        cmd.category = cmd.category || category;
-        commands.set(cmd.name, cmd);
+      try {
+        const filePath = `../commands/${category}/${file}`;
+        const { default: cmd } = await import(`${filePath}?update=${Date.now()}`);
+        if (cmd && cmd.name) {
+          cmd.category = cmd.category || category;
+          commands.set(cmd.name, cmd);
+        }
+      } catch (err) {
+        logger.error('LOADER', `Impossible de charger ${category}/${file}`, err);
       }
     }
   }
-  console.log(`✓ ${commands.size} commandes chargées dans VEXOR MD`);
+  logger.info('LOADER', `${commands.size} commandes chargées dans VEXOR MD`);
 }
 
-// 2. Gestionnaire principal des messages
 export async function handleMessage(sock, m) {
   if (!m.message || m.chat === 'status@broadcast') return;
 
-  const isOwner =
-    m.fromMe || m.sender.split('@')[0] === config.ownerNumber.replace(/[^0-9]/g, '');
+  const ownerClean = config.ownerNumber.replace(/[^0-9]/g, '');
+  const botIds = [sock.user?.id, sock.user?.lid].filter(Boolean).map(normalizeId);
+  const senderId = normalizeId(m.sender);
 
-  // --- LOGIQUE DE GROUPE (STATS, ANTISTATUS, ANTILINK) ---
+  const isOwner = m.fromMe || senderId === ownerClean || botIds.includes(senderId);
+
   let isAdmin = false;
   let isBotAdmin = false;
 
   if (m.isGroup) {
-    // Compteur automatique pour .stats
-    if (!m.fromMe) {
-      incrementMessageCount(m.chat, m.sender);
-    }
-
+    if (!m.fromMe) incrementMessageCount(m.chat, m.sender);
     const groupConfig = getGroupConfig(m.chat);
 
-    // Vérification des rôles Admin uniquement si nécessaire
     if (groupConfig.antistatus || groupConfig.antilink || m.body.startsWith(config.prefix)) {
-      const metadata = await sock.groupMetadata(m.chat).catch(() => null);
+      const metadata = await sock.groupMetadata(m.chat).catch(err => {
+        logger.error('GROUP', 'Impossible de lire groupMetadata', err);
+        return null;
+      });
+
       if (metadata) {
-        const botJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-        const senderParticipant = metadata.participants.find(p => p.id === m.sender);
-        const botParticipant = metadata.participants.find(p => p.id === botJid);
+        const senderParticipant = metadata.participants.find(p =>
+          matchParticipant(p, [senderId])
+        );
+        const botParticipant = metadata.participants.find(p =>
+          matchParticipant(p, botIds)
+        );
+
         isAdmin = Boolean(senderParticipant?.admin);
         isBotAdmin = Boolean(botParticipant?.admin);
+
+        if (m.body.startsWith(config.prefix)) {
+          logger.debug('ADMIN-CHECK', `Groupe: ${metadata.subject}`, {
+            botIds,
+            botRole: botParticipant?.admin || 'none',
+            senderRole: senderParticipant?.admin || 'none',
+            isBotAdmin,
+            isAdmin
+          });
+        }
       }
     }
 
-    // Protection ANTISTATUS (Mention du groupe dans une story)
     if (groupConfig.antistatus && m.isStatusMention && !isAdmin && !isOwner) {
-      if (isBotAdmin) {
-        await sock.sendMessage(m.chat, { delete: m.key });
-      }
-      const warnBox = formatBox('ᴀɴᴛɪsᴛᴀᴛᴜs', [
-        `${toBoldSmallCaps('user')} : @${m.sender.split('@')[0]}`,
-        `${toBoldSmallCaps('action')} : ${toBoldSmallCaps('status mention deleted')}`
+      if (isBotAdmin) await sock.sendMessage(m.chat, { delete: m.key });
+      const warnBox = formatBox('antistatus', [
+        `${toBoldSmallCaps('user')} : @${senderId}`,
+        `${toBoldSmallCaps('action')} : ${toBoldSmallCaps('mention statut supprimee')}`
       ]);
       await sock.sendMessage(m.chat, { text: warnBox, mentions: [m.sender] });
       return;
     }
 
-    // Protection ANTILINK
     const linkRegex = /chat\.whatsapp\.com\/([0-9A-Za-z]{20,24})/i;
     if (groupConfig.antilink && linkRegex.test(m.body) && !isAdmin && !isOwner) {
-      if (isBotAdmin) {
-        await sock.sendMessage(m.chat, { delete: m.key });
-      }
-      const warnBox = formatBox('ᴀɴᴛɪʟɪɴᴋ', [
-        `${toBoldSmallCaps('user')} : @${m.sender.split('@')[0]}`,
-        `${toBoldSmallCaps('action')} : ${toBoldSmallCaps('link deleted')}`
+      if (isBotAdmin) await sock.sendMessage(m.chat, { delete: m.key });
+      const warnBox = formatBox('antilink', [
+        `${toBoldSmallCaps('user')} : @${senderId}`,
+        `${toBoldSmallCaps('action')} : ${toBoldSmallCaps('lien supprime')}`
       ]);
       await sock.sendMessage(m.chat, { text: warnBox, mentions: [m.sender] });
       return;
     }
   }
 
-  // --- EXÉCUTION DES COMMANDES ---
   if (!m.body.startsWith(config.prefix)) return;
   if (config.mode === 'private' && !isOwner) return;
 
   const args = m.body.slice(config.prefix.length).trim().split(/ +/);
   const cmdName = args.shift().toLowerCase();
 
-  // Recherche par nom ou par alias
   const cmd =
     commands.get(cmdName) ||
     [...commands.values()].find(c => c.aliases && c.aliases.includes(cmdName));
 
   if (!cmd) return;
 
-  // Vérifications des permissions (Design 2)
+  logger.info('CMD', `Exécution de ${config.prefix}${cmd.name}`, {
+    from: m.sender,
+    chat: m.chat,
+    args
+  });
+
   if (cmd.ownerOnly && !isOwner) {
-    return m.reply(formatBox('ᴀᴄᴄᴇss ᴅᴇɴɪᴇᴅ', [`${toBoldSmallCaps('owner only command')}`]));
+    return m.reply(formatBox(t('access_denied'), [toBoldSmallCaps(t('owner_only'))]));
   }
   if (cmd.groupOnly && !m.isGroup) {
-    return m.reply(formatBox('ᴀᴄᴄᴇss ᴅᴇɴɪᴇᴅ', [`${toBoldSmallCaps('group only command')}`]));
+    return m.reply(formatBox(t('access_denied'), [toBoldSmallCaps(t('group_only'))]));
   }
   if (cmd.adminOnly && !isAdmin && !isOwner) {
-    return m.reply(formatBox('ᴀᴄᴄᴇss ᴅᴇɴɪᴇᴅ', [`${toBoldSmallCaps('admin only command')}`]));
+    return m.reply(formatBox(t('access_denied'), [toBoldSmallCaps(t('admin_only'))]));
   }
   if (cmd.botAdminOnly && !isBotAdmin) {
-    return m.reply(formatBox('ᴇʀʀᴏʀ', [`${toBoldSmallCaps('bot must be admin')}`]));
+    return m.reply(formatBox(t('error'), [toBoldSmallCaps(t('bot_must_be_admin'))]));
   }
 
   try {
@@ -128,15 +161,18 @@ export async function handleMessage(sock, m) {
       commands,
       toSmallCaps,
       toBoldSmallCaps,
-      formatBox
+      formatBox,
+      t,
+      logger
     });
   } catch (err) {
-    console.error(err);
-    await m.reply(formatBox('sʏsᴛᴇᴍ ᴇʀʀᴏʀ', [`${toBoldSmallCaps(err.message || 'execution failed')}`]));
+    logger.error(`CMD:${cmd.name}`, 'Erreur pendant exécution', err);
+    await m.reply(
+      formatBox(t('system_error'), [toBoldSmallCaps(err.message || t('exec_failed'))])
+    );
   }
 }
 
-// 3. Gestionnaire Welcome & Goodbye
 export async function handleGroupParticipants(sock, { id, participants, action }) {
   const groupConfig = getGroupConfig(id);
   if (action === 'add' && !groupConfig.welcome) return;
@@ -152,10 +188,10 @@ export async function handleGroupParticipants(sock, { id, participants, action }
       ppUrl = await sock.profilePictureUrl(user, 'image');
     } catch {}
 
-    const tag = `@${user.split('@')[0]}`;
+    const tag = `@${normalizeId(user)}`;
     const isWelcome = action === 'add';
 
-    const boxText = formatBox(isWelcome ? 'ᴡᴇʟᴄᴏᴍᴇ' : 'ɢᴏᴏᴅʙʏᴇ', [
+    const boxText = formatBox(isWelcome ? 'welcome' : 'goodbye', [
       `${toBoldSmallCaps('user')} : ${tag}`,
       `${toBoldSmallCaps('group')} : ${toBoldSmallCaps(groupName)}`,
       `${toBoldSmallCaps('members')} : ${toBoldSmallCaps(String(count))}`
