@@ -34,8 +34,8 @@ export function getGroupConfig(jid) {
 
 // Modifie un paramètre du groupe (ex: welcome, antistatus)
 export function setGroupConfig(jid, key, value) {
-  const db = getDb();
-  if (!db.groups[jid]) getGroupConfig(jid);
+  getGroupConfig(jid); // crée la config du groupe si elle n'existe pas
+  const db = getDb(); // relecture APRÈS la création
   db.groups[jid][key] = value;
   saveDb(db);
 }
@@ -63,5 +63,6 @@ export function getBotLang() {
 export function setBotLang(lang) {
   const db = getDb();
   db.lang = lang;
-  saveDb(db);
-  }
+  saveDb
+  (db);
+    }
