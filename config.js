@@ -11,7 +11,7 @@ export default {
   mode: 'public', // 'public' ou 'private'
   
   // Image fixe de Shinmon Benimaru (utilisée pour la miniature et l'image du menu)
-  benimaruPic: process.env.BOT_IMAGE || 'https://files.catbox.moe/fnfcol.jpg',
+  benimaruPic: process.env.BOT_IMAGE || 'https://files.catbox.moe/95onjv.jpg',
   
   // Lien qui fait apparaître "whatsapp.com" dans l'encadré externalAdReply
   channelUrl: process.env.CHANNEL_URL || 'https://whatsapp.com/channel/0029VaXXXXXXXX'
