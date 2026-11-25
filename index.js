@@ -59,11 +59,16 @@ async function startVexor() {
   // Réception des messages
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
-    const rawMsg = messages[0];
-    if (!rawMsg) return;
-
-    const m = serialize(sock, rawMsg);
-    await handleMessage(sock, m);
+    for (const rawMsg of messages) {
+      if (!rawMsg?.message) continue;
+      try {
+        const m = serialize(sock, rawMsg);
+        // Sans await : une commande lente ne bloque pas la détection des autres messages
+        handleMessage(sock, m).catch(err => console.error('Erreur traitement message :', err));
+      } catch (err) {
+        console.error('Erreur serialize :', err);
+      }
+    }
   });
 
   // Événements Welcome & Goodbye
@@ -72,4 +77,5 @@ async function startVexor() {
   });
 }
 
-startVexor();
+sta
+  rtVexor();
