@@ -5,25 +5,17 @@ import { toSmallCaps, toBoldSmallCaps, formatBox } from './font.js';
 import { getGroupConfig, incrementMessageCount } from './db.js';
 import { t } from './lang.js';
 import { logger } from './logger.js';
+import {
+  normalizeId,
+  getSenderIds,
+  getBotIds,
+  getRoles,
+  getMeta,
+  invalidateMeta,
+  runGuards
+} from './guard.js';
 
 export const commands = new Map();
-
-// Extrait uniquement l'identifiant brut (gère @s.whatsapp.net et @lid)
-function normalizeId(jid = '') {
-  return String(jid).split(':')[0].split('@')[0];
-}
-
-function matchParticipant(participant, targetIds) {
-  const pIds = [
-    participant.id,
-    participant.jid,
-    participant.phoneNumber,
-    participant.lid
-  ]
-    .filter(Boolean)
-    .map(normalizeId);
-  return pIds.some(id => targetIds.includes(id));
-}
 
 export async function loadCommands() {
   commands.clear();
@@ -56,66 +48,35 @@ export async function handleMessage(sock, m) {
   if (!m.message || m.chat === 'status@broadcast') return;
 
   const ownerClean = config.ownerNumber.replace(/[^0-9]/g, '');
-  const botIds = [sock.user?.id, sock.user?.lid].filter(Boolean).map(normalizeId);
-  const senderId = normalizeId(m.sender);
+  const botIds = getBotIds(sock);
+  const senderIds = getSenderIds(m);
 
-  const isOwner = m.fromMe || senderId === ownerClean || botIds.includes(senderId);
+  const isOwner =
+    m.fromMe || senderIds.some(id => id === ownerClean || botIds.includes(id));
 
   let isAdmin = false;
   let isBotAdmin = false;
+  let metadata = null;
 
   if (m.isGroup) {
+    // 1) GARDES IMMÉDIATS (antilink / antistatus) : avant tout le reste
+    if (await runGuards(sock, m, isOwner)) return;
+
+    // 2) Comptage des messages pour .stats
     if (!m.fromMe) incrementMessageCount(m.chat, m.sender);
-    const groupConfig = getGroupConfig(m.chat);
 
-    if (groupConfig.antistatus || groupConfig.antilink || m.body.startsWith(config.prefix)) {
-      const metadata = await sock.groupMetadata(m.chat).catch(err => {
-        logger.error('GROUP', 'Impossible de lire groupMetadata', err);
-        return null;
-      });
-
+    // 3) Rôles admin uniquement si c'est une commande
+    if (m.body.startsWith(config.prefix)) {
+      metadata = await getMeta(sock, m.chat, true);
       if (metadata) {
-        const senderParticipant = metadata.participants.find(p =>
-          matchParticipant(p, [senderId])
-        );
-        const botParticipant = metadata.participants.find(p =>
-          matchParticipant(p, botIds)
-        );
-
-        isAdmin = Boolean(senderParticipant?.admin);
-        isBotAdmin = Boolean(botParticipant?.admin);
-
-        if (m.body.startsWith(config.prefix)) {
-          logger.debug('ADMIN-CHECK', `Groupe: ${metadata.subject}`, {
-            botIds,
-            botRole: botParticipant?.admin || 'none',
-            senderRole: senderParticipant?.admin || 'none',
-            isBotAdmin,
-            isAdmin
-          });
-        }
+        ({ isAdmin, isBotAdmin } = getRoles(metadata, senderIds, botIds));
+        logger.debug('ADMIN-CHECK', `Groupe: ${metadata.subject}`, {
+          botIds,
+          senderIds,
+          isBotAdmin,
+          isAdmin
+        });
       }
-    }
-
-    if (groupConfig.antistatus && m.isStatusMention && !isAdmin && !isOwner) {
-      if (isBotAdmin) await sock.sendMessage(m.chat, { delete: m.key });
-      const warnBox = formatBox('antistatus', [
-        `${toBoldSmallCaps('user')} : @${senderId}`,
-        `${toBoldSmallCaps('action')} : ${toBoldSmallCaps('mention statut supprimee')}`
-      ]);
-      await sock.sendMessage(m.chat, { text: warnBox, mentions: [m.sender] });
-      return;
-    }
-
-    const linkRegex = /chat\.whatsapp\.com\/([0-9A-Za-z]{20,24})/i;
-    if (groupConfig.antilink && linkRegex.test(m.body) && !isAdmin && !isOwner) {
-      if (isBotAdmin) await sock.sendMessage(m.chat, { delete: m.key });
-      const warnBox = formatBox('antilink', [
-        `${toBoldSmallCaps('user')} : @${senderId}`,
-        `${toBoldSmallCaps('action')} : ${toBoldSmallCaps('lien supprime')}`
-      ]);
-      await sock.sendMessage(m.chat, { text: warnBox, mentions: [m.sender] });
-      return;
     }
   }
 
@@ -147,6 +108,10 @@ export async function handleMessage(sock, m) {
     return m.reply(formatBox(t('access_denied'), [toBoldSmallCaps(t('admin_only'))]));
   }
   if (cmd.botAdminOnly && !isBotAdmin) {
+    logger.info('ADMIN-CHECK', 'Bot non détecté admin', {
+      botIds,
+      admins: metadata?.participants?.filter(p => p.admin).map(p => p.id)
+    });
     return m.reply(formatBox(t('error'), [toBoldSmallCaps(t('bot_must_be_admin'))]));
   }
 
@@ -174,6 +139,7 @@ export async function handleMessage(sock, m) {
 }
 
 export async function handleGroupParticipants(sock, { id, participants, action }) {
+  invalidateMeta(id);
   const groupConfig = getGroupConfig(id);
   if (action === 'add' && !groupConfig.welcome) return;
   if (action === 'remove' && !groupConfig.goodbye) return;
@@ -215,3 +181,4 @@ export async function handleGroupParticipants(sock, { id, participants, action }
     });
   }
   }
+  
