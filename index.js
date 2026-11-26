@@ -8,6 +8,16 @@ import pino from 'pino';
 import config from './config.js';
 import { serialize } from './utils/serialize.js';
 import { loadCommands, handleMessage, handleGroupParticipants } from './utils/handler.js';
+import makeWASocket, {
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore
+} from '@whiskeysockets/baileys';
+import pino from 'pino';
+import config from './config.js';
+import { serialize } from './utils/serialize.js';
+import { loadCommands, handleMessage, handleGroupParticipants } from './utils/handler.js';
 
 async function startVexor() {
   await loadCommands();
@@ -73,6 +83,11 @@ async function startVexor() {
 
   // Événements Welcome & Goodbye
   sock.ev.on('group-participants.update', async (update) => {
+    await handleGroupParticipants(sock, update);
+  });
+}
+
+startVexor();ck.ev.on('group-participants.update', async (update) => {
     await handleGroupParticipants(sock, update);
   });
 }
